@@ -873,6 +873,10 @@ fn emit_field_write(
             } else {
                 quote! { core::result::Result::<(), ::#crate_::DekuError>::Ok(()) }
             }
+        } else if super::deku_read::byte_array_len(input, f).is_some() {
+            // One `write_all` for a plain byte array, in place of one write per
+            // element through the generic `[T; N]` impl.
+            quote! { __deku_writer.write_bytes(&#object_prefix #field_ident[..]) }
         } else {
             quote! { ::#crate_::DekuWriter::to_writer(#object_prefix #field_ident, __deku_writer, (#write_args)) }
         }
