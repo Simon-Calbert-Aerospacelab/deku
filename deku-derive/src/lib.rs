@@ -262,6 +262,11 @@ struct DekuData {
 
     /// Bit Order for all fields
     bit_order: Option<syn::LitStr>,
+
+    /// let a run of adjacent fields also take in fields whose type implements
+    /// `DekuBitField`, not just primitives
+    #[cfg(feature = "bits")]
+    batch_bits: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -369,6 +374,49 @@ fn find_order_param_in_ctx(
 }
 
 impl DekuData {
+    /// True if the container carries an attribute a `DekuBitField` impl cannot
+    /// reproduce. `from_bit_run` is handed a `u64`, with no reader to read from
+    /// the wire or move a cursor with.
+    #[cfg(feature = "bits")]
+    pub fn any_container_set_incompatible_with_bit_field(&self) -> bool {
+        // Exhaustive on purpose: a new container attribute fails to compile here
+        // until it is classified.
+        let Self {
+            // Not attributes.
+            ident: _,
+            generics: _,
+            data: _,
+            // Read by the caller, not merely tested: these decide the width and
+            // the orders a run has to line up with.
+            endian: _,
+            id: _,
+            id_type: _,
+            id_endian: _,
+            bits: _,
+            bit_order: _,
+            // Cannot affect matching a literal id out of a `u64`. A `repr`
+            // discriminant arrives with the variant `id` unset, already declined.
+            repr: _,
+            ctx: _,
+            ctx_default: _,
+            batch_bits: _,
+
+            magic,
+            bytes,
+            seek_rewind,
+            seek_from_current,
+            seek_from_end,
+            seek_from_start,
+        } = self;
+
+        magic.is_some()
+            || bytes.is_some()
+            || *seek_rewind
+            || seek_from_current.is_some()
+            || seek_from_end.is_some()
+            || seek_from_start.is_some()
+    }
+
     fn from_input(input: TokenStream) -> Result<Self, TokenStream> {
         let input = match syn::parse2(input) {
             Ok(input) => input,
@@ -440,6 +488,8 @@ impl DekuData {
             seek_from_end: receiver.seek_from_end?,
             seek_from_start: receiver.seek_from_start?,
             bit_order,
+            #[cfg(feature = "bits")]
+            batch_bits: receiver.batch_bits,
         };
 
         DekuData::validate(&data)?;
@@ -1010,6 +1060,35 @@ struct VariantData {
 }
 
 impl VariantData {
+    /// True if the variant carries something a `DekuBitField` impl cannot
+    /// reproduce. `from_bit_run` matches a literal id out of a `u64`: no reader
+    /// for a custom `reader`, no fields to populate.
+    #[cfg(feature = "bits")]
+    pub fn any_variant_set_incompatible_with_bit_field(&self) -> bool {
+        // Exhaustive on purpose: a new variant attribute fails to compile here
+        // until it is classified.
+        let Self {
+            // Not an attribute.
+            ident: _,
+            // The caller requires a literal `id`, which is more than being set.
+            id: _,
+            // Only reachable with `id` unset, which the caller declines.
+            discriminant: _,
+
+            fields,
+            id_pat,
+            reader,
+            writer,
+            default,
+        } = self;
+
+        !fields.is_empty()
+            || id_pat.is_some()
+            || reader.is_some()
+            || writer.is_some()
+            || default.unwrap_or(false)
+    }
+
     fn from_receiver(receiver: DekuVariantReceiver) -> Result<Self, TokenStream> {
         let fields = ast::Fields::new(
             receiver.fields.style,
@@ -1123,6 +1202,12 @@ struct DekuReceiver {
     /// Bit Order of field
     #[darling(default)]
     bit_order: Option<syn::LitStr>,
+
+    /// let a run of adjacent fields also take in fields whose type implements
+    /// `DekuBitField`, not just primitives
+    #[cfg(feature = "bits")]
+    #[darling(default)]
+    batch_bits: bool,
 }
 
 type ReplacementError = TokenStream;
