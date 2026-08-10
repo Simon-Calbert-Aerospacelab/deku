@@ -262,6 +262,11 @@ struct DekuData {
 
     /// Bit Order for all fields
     bit_order: Option<syn::LitStr>,
+
+    /// let a run of adjacent fields also take in fields whose type implements
+    /// `DekuBitField`, not just primitives
+    #[cfg(feature = "bits")]
+    batch_bits: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -440,6 +445,8 @@ impl DekuData {
             seek_from_end: receiver.seek_from_end?,
             seek_from_start: receiver.seek_from_start?,
             bit_order,
+            #[cfg(feature = "bits")]
+            batch_bits: receiver.batch_bits,
         };
 
         DekuData::validate(&data)?;
@@ -1123,6 +1130,12 @@ struct DekuReceiver {
     /// Bit Order of field
     #[darling(default)]
     bit_order: Option<syn::LitStr>,
+
+    /// let a run of adjacent fields also take in fields whose type implements
+    /// `DekuBitField`, not just primitives
+    #[cfg(feature = "bits")]
+    #[darling(default)]
+    batch_bits: bool,
 }
 
 type ReplacementError = TokenStream;

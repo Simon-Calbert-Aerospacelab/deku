@@ -789,6 +789,55 @@ pub trait DekuEnumExt<'__deku, T> {
     fn deku_id(&self) -> Result<T, DekuError>;
 }
 
+/// "Bit field" trait: a type whose whole wire form is a fixed run of bits that
+/// converts to and from an integer without touching the reader or writer.
+///
+/// This is what lets `#[deku(batch_bits)]` fold a non-primitive field into the
+/// single read or write it emits for a run of adjacent fields. See the
+/// `batch_bits` section of the crate documentation.
+///
+/// `DekuRead` derives this automatically for an enum whose variants are all
+/// unit variants and whose `id_type` is an unsigned primitive, so a flag enum
+/// gets it without any annotation:
+///
+/// ```rust
+/// use deku::prelude::*;
+///
+/// #[derive(Debug, PartialEq, DekuRead, DekuWrite)]
+/// #[deku(id_type = "u8", bits = 2, endian = "big")]
+/// enum Flag {
+///     #[deku(id = 0b00)]
+///     Off,
+///     #[deku(id = 0b11)]
+///     On,
+/// }
+///
+/// assert_eq!(<Flag as DekuBitField>::BITS, 2);
+/// assert_eq!(Flag::from_bit_run(0b11).unwrap(), Flag::On);
+/// assert_eq!(Flag::On.to_bit_run().unwrap(), 0b11);
+/// assert!(Flag::from_bit_run(0b01).is_err());
+/// ```
+#[cfg(feature = "bits")]
+pub trait DekuBitField: Sized {
+    /// Width of the wire form, in bits. Never zero, never more than 64.
+    const BITS: usize;
+
+    /// Builds the value from the low `Self::BITS` bits of `raw`.
+    ///
+    /// Higher bits of `raw` are not part of this field and are ignored.
+    ///
+    /// # Errors
+    /// Whatever the type's own reader would have returned for those bits,
+    /// typically [`DekuError::Parse`] for an id matching no variant.
+    fn from_bit_run(raw: u64) -> Result<Self, DekuError>;
+
+    /// The wire form as its low `Self::BITS` bits, all higher bits zero.
+    ///
+    /// # Errors
+    /// Whatever the type's own writer would have returned.
+    fn to_bit_run(&self) -> Result<u64, DekuError>;
+}
+
 /// Trait for types with a known, fixed binary size at compile-time
 ///
 /// Only implemented for fixed-size types (primitives, arrays, structs/enums composed
