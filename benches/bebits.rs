@@ -50,6 +50,72 @@ struct TmPrimaryHeader {
     fhp: u16,
 }
 
+/// A 1-bit flag typed as an enum, which is how a protocol crate models one.
+/// Every id is assigned so no input can fail.
+#[derive(Copy, Clone, Debug, PartialEq, DekuRead, DekuWrite)]
+#[deku(
+    id_type = "u8",
+    bits = 1,
+    endian = "endian",
+    ctx = "endian: deku::ctx::Endian"
+)]
+enum Flag {
+    #[deku(id = 0b0)]
+    Off,
+    #[deku(id = 0b1)]
+    On,
+}
+
+/// A 2-bit field typed as an enum, again total over its id space.
+#[derive(Copy, Clone, Debug, PartialEq, DekuRead, DekuWrite)]
+#[deku(
+    id_type = "u8",
+    bits = 2,
+    endian = "endian",
+    ctx = "endian: deku::ctx::Endian"
+)]
+enum SegmentLength {
+    #[deku(id = 0b00)]
+    Continuing,
+    #[deku(id = 0b01)]
+    First,
+    #[deku(id = 0b10)]
+    Last,
+    #[deku(id = 0b11)]
+    None,
+}
+
+/// The same 11 fields as `TmPrimaryHeader`, with the five flags typed as enums.
+/// Declared twice from one macro so the batched and unbatched versions are
+/// provably the same struct, and only the attribute differs.
+macro_rules! tm_enum_header {
+    ($name:ident $(, $attr:meta)?) => {
+        #[derive(Debug, PartialEq, DekuRead, DekuWrite)]
+        #[deku(endian = "big")]
+        $(#[deku($attr)])?
+        struct $name {
+            #[deku(bits = 2)]
+            tfvn: u8,
+            #[deku(bits = 10)]
+            scid: u16,
+            #[deku(bits = 3)]
+            vcid: u8,
+            ocf: Flag,
+            mcfc: u8,
+            vcfc: u8,
+            tfs: Flag,
+            syn: Flag,
+            po: Flag,
+            sli: SegmentLength,
+            #[deku(bits = 11)]
+            fhp: u16,
+        }
+    };
+}
+
+tm_enum_header!(TmEnumHeader);
+tm_enum_header!(TmEnumHeaderBatched, batch_bits);
+
 /// Same 6 octets, byte-aligned: the deku fast path, for scale. Also the control
 /// for any change to the bit paths, which must leave this one alone.
 #[derive(Debug, PartialEq, DekuRead, DekuWrite)]
@@ -123,6 +189,35 @@ fn bench(c: &mut Criterion) {
             acc
         })
     });
+    // The same header with its flags typed as enums, batched against not. Both
+    // run here so the pair is one measurement rather than two runs compared.
+    macro_rules! bench_enum_header_read {
+        ($label:literal, $ty:ident) => {
+            c.bench_function($label, |b| {
+                b.iter(|| {
+                    let mut r = Reader::new(Cursor::new(black_box(&stream)));
+                    let mut acc: u64 = 0;
+                    for _ in 0..FRAMES {
+                        let h = $ty::from_reader_with_ctx(&mut r, ()).unwrap();
+                        acc ^= u64::from(h.scid)
+                            ^ u64::from(h.fhp)
+                            ^ u64::from(h.mcfc)
+                            ^ u64::from(h.vcid)
+                            ^ u64::from(h.tfvn)
+                            ^ u64::from(h.ocf == Flag::On)
+                            ^ u64::from(h.tfs == Flag::On)
+                            ^ u64::from(h.syn == Flag::On)
+                            ^ u64::from(h.po == Flag::On)
+                            ^ u64::from(h.sli == SegmentLength::None);
+                    }
+                    acc
+                })
+            });
+        };
+    }
+    bench_enum_header_read!("be_tm_enum_header_x128", TmEnumHeader);
+    bench_enum_header_read!("be_tm_enum_header_batched_x128", TmEnumHeaderBatched);
+
     c.bench_function("be_six_bytes_aligned_x128", |b| {
         b.iter(|| {
             let mut r = Reader::new(Cursor::new(black_box(&stream)));
@@ -173,6 +268,28 @@ fn bench(c: &mut Criterion) {
             w.finalize().unwrap();
         })
     });
+
+    // Write side of the enum-flag header, batched against not.
+    let mut r = Reader::new(Cursor::new(&buf));
+    let enum_header = TmEnumHeader::from_reader_with_ctx(&mut r, ()).unwrap();
+    let mut r = Reader::new(Cursor::new(&buf));
+    let enum_header_batched = TmEnumHeaderBatched::from_reader_with_ctx(&mut r, ()).unwrap();
+    macro_rules! bench_enum_header_write {
+        ($label:literal, $value:ident) => {
+            c.bench_function($label, |b| {
+                let mut out = [0u8; FRAMES * 6];
+                b.iter(|| {
+                    let mut w = Writer::new(Cursor::new(out.as_mut_slice()));
+                    for _ in 0..FRAMES {
+                        black_box(&$value).to_writer(&mut w, ()).unwrap();
+                    }
+                    w.finalize().unwrap();
+                })
+            });
+        };
+    }
+    bench_enum_header_write!("be_write_tm_enum_header_x128", enum_header);
+    bench_enum_header_write!("be_write_tm_enum_header_batched_x128", enum_header_batched);
 
     // A stream of frames through one writer.
     c.bench_function("be_write_tm_primary_header_x128", |b| {
