@@ -82,6 +82,10 @@ fn emit_struct(input: &DekuData) -> Result<TokenStream, syn::Error> {
     let magic_write = emit_magic_write(input);
 
     let field_writes = emit_field_writes(input, &fields, false, None, &ident)?;
+
+    #[cfg(feature = "bits")]
+    tokens.extend(super::deku_read::emit_run_asserts(input, &fields, false));
+
     let field_updates = emit_field_updates(&fields, Some(quote! { self. }));
 
     let named = fields.style.is_struct();
@@ -332,6 +336,13 @@ fn emit_enum(input: &DekuData) -> Result<TokenStream, syn::Error> {
                 &ident,
             )?;
 
+            #[cfg(feature = "bits")]
+            tokens.extend(super::deku_read::emit_run_asserts(
+                input,
+                &variant.fields.as_ref(),
+                variant.id_pat.is_some(),
+            ));
+
             quote! {
                 {
                     #variant_id_write
@@ -512,43 +523,57 @@ fn emit_bit_run_write(
     object_prefix: &Option<TokenStream>,
     ident: &TokenStream,
 ) -> TokenStream {
+    use super::deku_read::{sum_bits, BitRunField};
+
     let crate_ = super::get_crate_name();
-    let total: usize = run.iter().map(|f| f.bits).sum();
+    let refs: Vec<&BitRunField> = run.iter().collect();
+    let total = sum_bits(&refs, &crate_);
     let ident = ident.to_string();
 
     let mut traces = TokenStream::new();
     let mut checks = TokenStream::new();
     let mut terms = Vec::with_capacity(run.len());
     let mut widths = Vec::with_capacity(run.len());
-    let mut consumed = 0usize;
     for (offset, field) in run.iter().enumerate() {
         let f = fields.fields[start + offset];
         let field_ident = f.get_ident(start + offset, object_prefix.is_none());
-        let bits = field.bits;
-        let shift = total - consumed - bits;
-        // A run holds at least two fields totalling at most 64 bits, so no single
-        // field in one is 64 bits wide and the shift below cannot overflow.
-        debug_assert!(bits < u64::BITS as usize);
-        let mask: u64 = (1u64 << bits) - 1;
+        // How many bits of the run sit below this field.
+        let shift = sum_bits(&refs[offset + 1..], &crate_);
+        let mask = field.mask(&crate_);
 
         if cfg!(feature = "logging") {
             let field_ident_str = field_ident.to_string();
             traces.extend(quote! { log::trace!("Writing: {}.{}", #ident, #field_ident_str); });
         }
 
-        let value = quote! { (*(#object_prefix #field_ident) as u64) };
-        // Every field keeps the rejection its own write performed. Where the field
-        // fills its type this folds away at compile time, because a value cast from
-        // that type cannot exceed the width.
-        if field.can_overflow {
-            let ordered = field.ordered;
-            checks.extend(quote! {
-                ::#crate_::writer::check_bit_size::<#ordered>(#value, #bits)?;
-            });
-        }
+        let value = match field {
+            BitRunField::Primitive {
+                bits,
+                ordered,
+                can_overflow,
+                ..
+            } => {
+                let value = quote! { (*(#object_prefix #field_ident) as u64) };
+                // Every field keeps the rejection its own write performed. Where the
+                // field fills its type this folds away at compile time, because a
+                // value cast from that type cannot exceed the width.
+                if *can_overflow {
+                    let ordered = *ordered;
+                    checks.extend(quote! {
+                        ::#crate_::writer::check_bit_size::<#ordered>(#value, #bits)?;
+                    });
+                }
+                value
+            }
+            // The type owns the "does this fit" question, so `to_bit_run` is
+            // both the value and the check.
+            BitRunField::BitField { ty } => quote! {
+                (<#ty as ::#crate_::DekuBitField>::to_bit_run(#object_prefix #field_ident)?)
+            },
+        };
+
         terms.push(quote! { ((#value & #mask) << #shift) });
-        widths.push(bits);
-        consumed += bits;
+        widths.push(field.bits(&crate_));
     }
 
     quote! {
