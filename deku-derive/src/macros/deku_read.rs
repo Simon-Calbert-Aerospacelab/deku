@@ -901,6 +901,84 @@ fn is_bool(ty: &syn::Type) -> bool {
     matches!(ty, syn::Type::Path(p) if p.qself.is_none() && p.path.is_ident("bool"))
 }
 
+/// `N` for a field that is a plain `[u8; N]`, which one `read_exact` can serve,
+/// or `None` for anything else.
+///
+/// The generic `[T; N]` impl reads element by element, so a 4-byte address field
+/// costs four trips through the primitive reader plus the `MaybeUninit` and
+/// drop-on-error bookkeeping the general case needs. A byte array needs none of
+/// it: the bytes are the value.
+pub(crate) fn byte_array_len(input: &DekuData, f: &FieldData) -> Option<usize> {
+    // Every other attribute must be unset, for the same reason a bit-field run
+    // needs them unset: each one either moves the cursor, makes the read
+    // conditional, or changes what a single field means.
+    #[cfg(feature = "bits")]
+    if f.bits.is_some()
+        || f.bits_read.is_some()
+        || f.pad_bits_before.is_some()
+        || f.pad_bits_after.is_some()
+    {
+        return None;
+    }
+    if f.bytes.is_some()
+        || f.count.is_some()
+        || f.bytes_read.is_some()
+        || f.until.is_some()
+        || f.read_all
+        || f.map.is_some()
+        || f.ctx.is_some()
+        || f.update.is_some()
+        || f.reader.is_some()
+        || f.writer.is_some()
+        || f.skip.is_some()
+        || f.pad_bytes_before.is_some()
+        || f.pad_bytes_after.is_some()
+        || f.temp
+        || f.temp_value.is_some()
+        || f.cond.is_some()
+        || f.assert.is_some()
+        || f.assert_eq.is_some()
+        || f.seek_rewind
+        || f.seek_from_current.is_some()
+        || f.seek_from_end.is_some()
+        || f.seek_from_start.is_some()
+        || f.magic.is_some()
+    {
+        return None;
+    }
+
+    // `Msb0` only. On an unaligned cursor `read_bytes_const_into` reverses the
+    // buffer for `Lsb0`, which is not what a sequence of byte reads does.
+    // Endianness needs no check, since a byte has no byte order.
+    #[cfg(feature = "bits")]
+    if let Some(order) = f.bit_order.as_ref().or(input.bit_order.as_ref()) {
+        if order.value() != "msb" {
+            return None;
+        }
+    }
+    #[cfg(not(feature = "bits"))]
+    let _ = input;
+
+    let syn::Type::Array(array) = &f.ty else {
+        return None;
+    };
+    let syn::Type::Path(elem) = &*array.elem else {
+        return None;
+    };
+    if !elem.path.is_ident("u8") {
+        return None;
+    }
+    let syn::Expr::Lit(syn::ExprLit {
+        lit: syn::Lit::Int(len),
+        ..
+    }) = &array.len
+    else {
+        return None;
+    };
+    let len = len.base10_parse::<usize>().ok()?;
+    (len != 0).then_some(len)
+}
+
 /// Groups adjacent run-eligible fields, keyed by the index the run starts at.
 ///
 /// A run is capped at 64 bits, the width the reader returns, and must hold at
@@ -1392,6 +1470,23 @@ fn emit_field_read(
                     }
                 })
             }
+            // One `read_exact` for a plain byte array, in place of one read per
+            // element through the generic `[T; N]` impl.
+            if ret.is_empty() {
+                if let Some(n) = byte_array_len(input, f) {
+                    ret.extend(quote! {
+                        {
+                            let mut __deku_bytes = [0u8; #n];
+                            __deku_reader.read_bytes_const_into::<#n>(
+                                &mut __deku_bytes,
+                                ::#crate_::ctx::Order::Msb0,
+                            )?;
+                            __deku_bytes
+                        }
+                    })
+                }
+            }
+
             if ret.is_empty() {
                 ret.extend(quote! {
                     #type_as_deku_read::from_reader_with_ctx
