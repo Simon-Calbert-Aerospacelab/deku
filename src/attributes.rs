@@ -34,6 +34,7 @@ enum DekuEnum {
 |-----------|------------------|------------
 | [endian](#endian) | top-level, field | Set the endianness
 | [bit_order](#bit_order) | top-level, field | Set the bit-order when reading bits
+| [batch_bits](#batch_bits) | top-level | Let a run of adjacent bit fields also take in [DekuBitField](crate::DekuBitField) fields, not just primitives
 | [magic](#magic) | top-level, field | A magic value that must be present at the start of this struct/enum/field
 | [seek_from_current](#seek_from_current) | top-level, field | Sets the offset of reader and writer to the current position plus the specified number of bytes
 | [seek_from_end](#seek_from_end) | top-level, field | Sets the offset to the size of reader and writer plus the specified number of bytes
@@ -325,6 +326,77 @@ assert_eq!(bytes, data);
 # #[cfg(not(all(feature = "alloc", feature = "bits")))]
 # fn main() {}
 ```
+
+# batch_bits
+
+Lets a run of adjacent big-endian `Msb0` fields also take in fields whose type
+implements [DekuBitField](crate::DekuBitField), not just primitives.
+
+Deku already serves a run of adjacent bit fields with one read and one write,
+extracting each field with a shift and a mask. Only primitives qualify by
+default, since that is the only case where the macro can see a field's width, so
+a field typed as an enum splits the run in two.
+
+`DekuBitField` puts the width on the type instead, and `DekuRead` derives it for
+an enum read by reading its id and nothing else: all unit variants, a literal
+`id` on each, an unsigned primitive `id_type`, a literal `bits` no wider than
+that type, and `Msb0`, plus an explicit big endian past 8 bits. That covers the
+flag enums bit-packed headers are made of, with nothing on the enum itself. Any
+other shape keeps its own read and splits the run as before.
+
+This attribute tells the macro it may rely on the trait. It is opt-in because
+the macro cannot ask whether a type implements one: if a field in a run does
+not, the derive reports "trait bound `T: DekuBitField` is not satisfied".
+
+```rust
+# use deku::prelude::*;
+# #[cfg(feature = "bits")]
+#[derive(Debug, PartialEq, DekuRead, DekuWrite)]
+#[deku(id_type = "u8", bits = 1, endian = "endian", ctx = "endian: deku::ctx::Endian")]
+enum Flag {
+    #[deku(id = 0b0)]
+    Off,
+    #[deku(id = 0b1)]
+    On,
+}
+
+# #[cfg(feature = "bits")]
+#[derive(Debug, PartialEq, DekuRead, DekuWrite)]
+#[deku(endian = "big", batch_bits)]
+struct Header {
+    #[deku(bits = 3)]
+    version: u8,
+    secondary: Flag,
+    sync: Flag,
+    #[deku(bits = 3)]
+    channel: u8,
+}
+
+# #[cfg(all(feature = "alloc", feature = "bits"))]
+# fn main() {
+let data = vec![0b101_1_0_110];
+let (_, header) = Header::from_bytes((&data, 0)).unwrap();
+assert_eq!(header, Header {
+    version: 0b101,
+    secondary: Flag::On,
+    sync: Flag::Off,
+    channel: 0b110,
+});
+assert_eq!(header.to_bytes().unwrap(), data);
+# }
+#
+# #[cfg(not(all(feature = "alloc", feature = "bits")))]
+# fn main() {}
+```
+
+All four fields above are served by one read and one write instead of four of
+each. Nothing else changes: a batched run accepts and rejects exactly the inputs
+the individual reads did, and produces the same bytes.
+
+A run is capped at the 64 bits a single read returns. Where every width is
+known to the macro it splits runs to fit; where a width comes from the trait it
+cannot, so an oversized run is a compile error asking you to drop the attribute
+on that struct.
 
 # magic
 
