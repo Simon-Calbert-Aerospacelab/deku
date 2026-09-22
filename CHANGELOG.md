@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- `batch_bits`: take a `DekuBitField` field, such as a flag enum, into the
+  single read and write that a run of adjacent bit fields already uses, plus
+  the `DekuBitField` trait that `DekuRead` derives for a qualifying enum
+
 ### Fixed
 
 - `Writer`: an `Lsb0` write that ends on a byte boundary no longer reorders the
